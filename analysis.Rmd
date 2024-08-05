@@ -1,0 +1,1586 @@
+---
+title: "Project data processing"
+author: '2478935'
+date: "2024-07-11"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyr)
+library(tidyverse)
+library(ggplot2)
+library(readxl)
+library(dbplyr)
+library(brms)
+library(bayestestR)
+library(effects)
+library(faux)
+library(report)
+library(emmeans)
+library(bayesplot)
+library(knitr)
+library(see)
+```
+
+```{r}
+#loading all needed dataframes
+data_rsc <- read_xlsx("RSC/dataframes.xlsx") 
+data_ca1 <- read_xlsx("CA1/dataframes_ca1.xlsx")
+data_rsc_flk2 <- read_xlsx("FLK2_RSC/dataframes_flk2.xlsx")
+data_ca1_flk2 <- read_xlsx("FLK2_CA1/dataframes_ca1_flk2.xlsx")
+```
+
+
+```{r}
+dataset_flk1 <- bind_rows(data_rsc, data_ca1)
+dataset_flk2 <- bind_rows(data_rsc_flk2, data_ca1_flk2)
+```
+
+```{r}
+flk1_wide <- dataset_flk1 |>
+  mutate(MouseID = gsub("M_coordinates", "Microglia", MouseID)) |>
+  mutate(MouseID = gsub("AB_coordinates", "Abeta", MouseID)) |>
+  separate(MouseID, c("ID", "Type", "Brain_Area")) |>
+  mutate(StimCondition = case_when(
+    grepl("^M[A-C]", ID) ~ "40Hz",
+    grepl("^M[D-F]", ID) ~ "4Hz",
+    grepl("^M[0-9G]", ID) ~ "Dark",
+    TRUE ~ "Other")) |>
+  pivot_wider(
+    names_from = Type,
+    values_from = c(Area, X, Y, Feret)
+  ) |>
+  mutate(Strain = case_when(
+    grepl("^M[A-G]", ID) ~ "APP",
+    ID %in% c("M03", "M05", "M09") ~ "APP",
+    ID %in% c("M06", "M07", "M11", "M12", "M13") ~ "WT",
+    TRUE ~ "Other"
+  )) |>
+  select(-Area_Results, -X_Results, -Y_Results, -Feret_Results) |>
+  mutate(Sex = case_when(
+    grepl("^M[A-D0-13]", ID) ~ "Male",
+    grepl("^M[F-G]", ID) ~ "Male",
+    grepl("^M[E]", ID) ~ "Female"
+  ))
+```
+
+```{r}
+#Calculating baseline values for CA1 and RSC
+baseline_WT <- flk1_wide |>
+  group_by(Brain_Area) |> #grouping by area so we get two baselines
+  filter(Strain == "WT") |> #only selecting the WT group (wild type only were in the dark condition so we get a real baseline measure)
+  summarise(
+    mean_area = mean(Area_Microglia, na.rm = TRUE),
+    mean_branch_length = mean(`Average Branch Length`, na.rm = TRUE) #perfomr summary statistics to get the mean as a baseline value to average our data against
+  )
+flk1_wide <- flk1_wide |>
+  left_join(baseline_WT, by = "Brain_Area")
+
+
+flk1_normalised <- flk1_wide |>
+  mutate(normalised_area = (Area_Microglia - mean_area) / mean_area * 100,
+          normalised_branch_length = (`Average Branch Length` - mean_branch_length) / mean_branch_length * 100
+  )
+  
+```
+
+
+```{r}
+ggplot(flk1_wide, aes(StimCondition, Area_Microglia, fill = Brain_Area)) +
+  geom_boxplot(alpha = 0.5) +
+  scale_fill_manual(values = c("springgreen3", "darkorange2")) +
+  labs(x = "Stimulation Condition",
+       y= "Microglia Body Size") +
+  labs(title = "Difference in microglia body size between stimulation conditions")
+```
+
+
+```{r}
+pos <- position_dodge(0.9)
+
+ggplot(flk1_wide, aes(StimCondition, Area_Microglia, fill = Brain_Area)) +
+  geom_violin(position = pos,
+              trim = FALSE,
+              width = 1.2,
+              alpha = 0.5) +
+  geom_boxplot(position = pos,
+               width = 0.2, 
+               alpha = 0, 
+               outlier.shape = NA) +
+  geom_jitter(position = pos,
+              size = 1.5, 
+              alpha = 0.5, 
+              color = "black") +
+  stat_summary(fun = "mean", 
+               geom = "point", 
+               position = pos) +
+  stat_summary(fun.data = "mean_se", 
+               geom = "errorbar", 
+               width = .1,
+               position = pos) +
+  scale_y_continuous(breaks = c(4e+04, 6e+04, 8e+04, 1e+05, 12e+04)) +
+  scale_fill_manual(values = c("orchid", "cornflowerblue")) +
+  labs(x = "Stimulation Condition",
+       y= "Microglia Body Size") +
+  labs(title = "Difference in microglia body size between stimulation conditions",
+       fill = "Brain Areas") +
+  theme_minimal()
+```
+
+```{r}
+ggplot(flk1_wide, aes(StimCondition, `Average Branch Length`, fill = Brain_Area)) +
+  geom_boxplot(alpha = 0.5) +
+  geom_jitter(size = 1) +
+  scale_fill_manual(values = c("springgreen3", "darkorange2")) +
+  labs(x = "Stimulation Condition",
+       y= "Microglia Process Length") +
+  labs(title = "Difference in microglia process length between stimulation conditions")
+```
+```{r}
+ggplot(flk1_wide, aes(StimCondition, `Average Branch Length`, fill = Brain_Area)) +
+  geom_violin(position = pos,
+              trim = FALSE,
+              width = 1,
+              alpha = 0.5) +
+  geom_boxplot(position = pos,
+               width = 0.2, 
+               alpha = 0, 
+               outlier.shape = NA) +
+  geom_jitter(position = pos,
+              size = 1.5, 
+              alpha = 0.5, 
+              color = "black") +
+  stat_summary(fun = "mean", 
+               geom = "point", 
+               position = pos) +
+  stat_summary(fun.data = "mean_se", 
+               geom = "errorbar", 
+               width = .1,
+               position = pos) +
+  scale_fill_manual(values = c("orchid", "cornflowerblue")) +
+  labs(x = "Stimulation Condition",
+       y = "Microglia Average Branch Length", 
+       title = "Difference in Microglia Average Branch Length Between Stimulation Conditions",
+       fill = "Brain Areas") +
+ theme_minimal()
+```
+```{r}
+ggplot(flk1_wide, aes(StimCondition, MicrogliaNumber, fill = Brain_Area)) +
+  geom_boxplot(alpha = 0.5) +
+  scale_fill_manual(values = c("springgreen3", "darkorange2")) +
+  labs(x = "Stimulation Condition",
+       y= "Microglia Number") +
+  labs(title = "Difference in number of microglia between stimulation conditions and areas")
+```
+
+## Microglia body size: no dummy coding
+
+```{r}
+microglia_body <- bf(normalised_area ~ StimCondition * Brain_Area +
+              (1 | ID))
+
+get_prior(microglia_body, data = flk1_normalised)
+```
+
+```{r}
+#assigning new priors for the each of the coefficients
+bodysize_prior1 <- prior(normal(30, 5), class = "b", coef = "StimCondition4Hz") +
+  prior(normal(65, 5), class = "b", coef = "Brain_AreaRSC") + #we need to fix this particular prior (stim 40 * RSC)
+  prior(normal(30, 5), class = "b", coef = "StimCondition4Hz:Brain_AreaRSC") +
+  prior(normal(0, 5), class = "b", coef = "StimConditionDark") +
+  prior(normal(0, 5), class = "b", coef = "StimConditionDark:Brain_AreaRSC") +
+  prior(normal(65, 5), class = "Intercept") +
+  prior(normal(0, 3), class = "sigma") +
+  prior(normal(0, 3), class = "sd")
+```
+
+```{r}
+microglia_body_fit <- brm(
+  formula = microglia_body,
+  data = flk1_normalised,
+  prior = bodysize_prior1,
+  family = gaussian(),
+  seed = 2900,
+  chains = 4,   
+  iter = 4000,
+  warmup = 1000,
+  control = list(adapt_delta = 0.95),
+  file = "Models/Model_microglia3"
+)
+```
+
+```{r}
+pairs(microglia_body_fit)
+```
+
+
+```{r}
+summary(microglia_body_fit)
+bayes_R2(microglia_body_fit)
+```
+
+```{r fig.height= 8}
+plot(microglia_body_fit)
+```
+
+```{r}
+plot(p_direction(microglia_body_fit),
+                 priors = TRUE)
+```
+
+```{r}
+plot(hdi(microglia_body_fit))
+```
+
+
+```{r}
+conditional_plots <- conditional_effects(microglia_body_fit)
+```
+
+```{r}
+
+#we then create different objects for each of the effects
+bodysize_condition <- plot(conditional_plots,
+     plot = FALSE,
+     cat_args = list(show.legend = F))[[1]] + #calls the stimulation condition plot
+  theme_bw() +
+  labs( x = "Stimulation Condition", y = "Percentage increase in microglia body size (% averaged to control)") +
+  labs(title = "Main Effect of Stimulation Condition on Microglia Body Size")
+
+bodysize_area <- plot(conditional_plots,
+     plot = FALSE,
+     cat_args = list(show.legend = F))[[2]] + #calls the brain area plot
+  theme_bw() +
+  labs( x = "Brain Area", y = "Percentage increase in microglia body size (% averaged to control)") +
+  labs(title = "Main Effect of Brain Area on Microglia Body Size")
+
+bodysize_stim_area <- plot(conditional_plots,
+     plot = FALSE,
+     cat_args = list(show.legend = F))[[3]] + #calls the interaction plot
+  theme_bw() +
+  labs( x = "Stimulation Condition", y = "Percentage increase in microglia body size (% averaged to control)") +
+  labs(title = "Effects of Stimulation Condition and Brain Area on Microglia Body Size")
+```
+
+```{r}
+pp_check(microglia_body_fit,
+         ndraws = 100)
+```
+
+```{r}
+plot(residuals(microglia_body_fit))
+qqnorm(residuals(microglia_body_fit))
+```
+
+### Comparing informative vs flat priors
+```{r}
+#we create a second model with the default priors
+microglia_body_fit2 <- brm(
+  formula = microglia_body,
+  data = flk1_normalised,
+  family = gaussian(),
+  seed = 2900,
+  chains = 4,   
+  iter = 4000,
+  warmup = 1000,
+  control = list(adapt_delta = 0.95),
+  file = "Models/Model_flat_microglia3"
+)
+```
+
+
+```{r}
+#we call a summary of the model to check the coefficients
+summary(microglia_body_fit2)
+
+#we compute R2
+bayes_R2(microglia_body_fit2)
+
+```
+```{r fig.height= 8}
+plot(microglia_body_fit2)
+```
+
+```{r}
+plot(p_direction(microglia_body_fit2),
+                 priors = TRUE)
+```
+
+```{r}
+plot(hdi(microglia_body_fit2))
+```
+
+
+```{r}
+conditional_plots2 <- conditional_effects(microglia_body_fit2)
+```
+
+```{r}
+
+#we then create different objects for each of the effects
+bodysize_condition2 <- plot(conditional_plots2,
+     plot = FALSE,
+     cat_args = list(show.legend = F))[[1]] + #calls the stimulation condition plot
+  theme_bw() +
+  labs( x = "Stimulation Condition", y = "Percentage increase in microglia body size (% averaged to control)") +
+  labs(title = "Main Effect of Stimulation Condition on Microglia Body Size")
+
+bodysize_area2 <- plot(conditional_plots2,
+     plot = FALSE,
+     cat_args = list(show.legend = F))[[2]] + #calls the brain area plot
+  theme_bw() +
+  labs( x = "Brain Area", y = "Percentage increase in microglia body size (% averaged to control)") +
+  labs(title = "Main Effect of Brain Area on Microglia Body Size")
+
+bodysize_stim_area2 <- plot(conditional_plots2,
+     plot = FALSE,
+     cat_args = list(show.legend = F))[[3]] + #calls the interaction plot
+  theme_bw() +
+  labs( x = "Stimulation Condition", y = "Percentage increase in microglia body size (% averaged to control)") +
+  labs(title = "Effects of Stimulation Condition and Brain Area on Microglia Body Size")
+```
+
+
+## Compraring with wider but specified priors
+```{r}
+microglia_body <- bf(normalised_area ~ StimCondition * Brain_Area +
+              (1 | ID))
+
+get_prior(microglia_body, data = flk1_normalised)
+```
+
+```{r}
+#assigning new priors for the each of the coefficients
+bodysize_prior3 <- prior(normal(30, 10), class = "b", coef = "StimCondition4Hz") +
+  prior(normal(65, 10), class = "b", coef = "Brain_AreaRSC") + #we need to fix this particular prior (stim 40 * RSC)
+  prior(normal(30, 10), class = "b", coef = "StimCondition4Hz:Brain_AreaRSC") +
+  prior(normal(0, 10), class = "b", coef = "StimConditionDark") +
+  prior(normal(0, 10), class = "b", coef = "StimConditionDark:Brain_AreaRSC") +
+  prior(normal(65, 10), class = "Intercept") +
+  prior(normal(0, 5), class = "sigma") +
+  prior(normal(0, 5), class = "sd")
+```
+
+```{r}
+microglia_body_fit3 <- brm(
+  formula = microglia_body,
+  data = flk1_normalised,
+  prior = bodysize_prior3,
+  family = gaussian(),
+  seed = 2900,
+  chains = 4,   
+  iter = 4000,
+  warmup = 1000,
+  control = list(adapt_delta = 0.95),
+  file = "Models/Model_wide_microglia3"
+)
+```
+
+
+```{r}
+summary(microglia_body_fit3)
+bayes_R2(microglia_body_fit3)
+```
+
+```{r fig.height= 8}
+plot(microglia_body_fit3)
+```
+
+```{r}
+plot(p_direction(microglia_body_fit3),
+                 priors = TRUE)
+```
+
+```{r}
+plot(hdi(microglia_body_fit3))
+```
+
+
+```{r}
+conditional_plots3 <- conditional_effects(microglia_body_fit3)
+```
+
+```{r}
+
+#we then create different objects for each of the effects
+bodysize_condition3 <- plot(conditional_plots3,
+     plot = FALSE,
+     cat_args = list(show.legend = F))[[1]] + #calls the stimulation condition plot
+  theme_bw() +
+  labs( x = "Stimulation Condition", y = "Percentage increase in microglia body size (% averaged to control)") +
+  labs(title = "Main Effect of Stimulation Condition on Microglia Body Size")
+
+bodysize_area3 <- plot(conditional_plots3,
+     plot = FALSE,
+     cat_args = list(show.legend = F))[[2]] + #calls the brain area plot
+  theme_bw() +
+  labs( x = "Brain Area", y = "Percentage increase in microglia body size (% averaged to control)") +
+  labs(title = "Main Effect of Brain Area on Microglia Body Size")
+
+bodysize_stim_area3 <- plot(conditional_plots3,
+     plot = FALSE,
+     cat_args = list(show.legend = F))[[3]] + #calls the interaction plot
+  theme_bw() +
+  labs( x = "Stimulation Condition", y = "Percentage increase in microglia body size (% averaged to control)") +
+  labs(title = "Effects of Stimulation Condition and Brain Area on Microglia Body Size")
+```
+
+## comapring with wider sd prior
+
+## Compraring with wider but specified priors
+```{r}
+microglia_body <- bf(normalised_area ~ StimCondition * Brain_Area +
+              (1 | ID))
+
+get_prior(microglia_body, data = flk1_normalised)
+```
+
+```{r}
+#assigning new priors for the each of the coefficients
+bodysize_prior4 <- prior(normal(30, 15), class = "b", coef = "StimCondition4Hz") +
+  prior(normal(65, 15), class = "b", coef = "Brain_AreaRSC") + #we need to fix this particular prior (stim 40 * RSC)
+  prior(normal(30, 15), class = "b", coef = "StimCondition4Hz:Brain_AreaRSC") +
+  prior(normal(0, 15), class = "b", coef = "StimConditionDark") +
+  prior(normal(0, 15), class = "b", coef = "StimConditionDark:Brain_AreaRSC") +
+  prior(normal(65, 15), class = "Intercept") +
+  prior(normal(0, 5), class = "sigma") +
+  prior(normal(0, 5), class = "sd")
+```
+
+```{r}
+microglia_body_fit4 <- brm(
+  formula = microglia_body,
+  data = flk1_normalised,
+  prior = bodysize_prior4,
+  family = gaussian(),
+  seed = 2900,
+  chains = 4,   
+  iter = 4000,
+  warmup = 1000,
+  control = list(adapt_delta = 0.95),
+  file = "Models/Model_wider_microglia3"
+)
+```
+
+
+```{r}
+summary(microglia_body_fit4)
+bayes_R2(microglia_body_fit4)
+```
+
+```{r fig.height= 8}
+plot(microglia_body_fit4)
+```
+
+```{r}
+plot(p_direction(microglia_body_fit4),
+                 priors = TRUE)
+```
+
+```{r}
+plot(hdi(microglia_body_fit4))
+```
+
+
+```{r}
+conditional_plots4 <- conditional_effects(microglia_body_fit4)
+```
+
+```{r}
+
+#we then create different objects for each of the effects
+bodysize_condition4 <- plot(conditional_plots4,
+     plot = FALSE,
+     cat_args = list(show.legend = F))[[1]] + #calls the stimulation condition plot
+  theme_bw() +
+  labs( x = "Stimulation Condition", y = "Percentage increase in microglia body size (% averaged to control)") +
+  labs(title = "Main Effect of Stimulation Condition on Microglia Body Size")
+
+bodysize_area4 <- plot(conditional_plots4,
+     plot = FALSE,
+     cat_args = list(show.legend = F))[[2]] + #calls the brain area plot
+  theme_bw() +
+  labs( x = "Brain Area", y = "Percentage increase in microglia body size (% averaged to control)") +
+  labs(title = "Main Effect of Brain Area on Microglia Body Size")
+
+bodysize_stim_area4 <- plot(conditional_plots4,
+     plot = FALSE,
+     cat_args = list(show.legend = F))[[3]] + #calls the interaction plot
+  theme_bw() +
+  labs( x = "Stimulation Condition", y = "Percentage increase in microglia body size (% averaged to control)") +
+  labs(title = "Effects of Stimulation Condition and Brain Area on Microglia Body Size")
+```
+
+```{r}
+bodysize_stim_area
+bodysize_stim_area2
+bodysize_stim_area3
+bodysize_stim_area4
+```
+
+
+```{r}
+pp_check(microglia_body_fit3,
+         ndraws = 100)
+```
+
+```{r}
+plot(residuals(microglia_body_fit3))
+qqnorm(residuals(microglia_body_fit3))
+```
+```{r}
+model1 <- describe_posterior(microglia_body_fit) |> 
+  mutate(Model = "User prior") |>
+  select(Model, Parameter, Median, CI_low, CI_high) 
+
+model2 <- describe_posterior(microglia_body_fit2) |>
+  mutate(Model = "Default prior") |> 
+  select(Model, Parameter, Median, CI_low, CI_high) 
+
+model3 <- describe_posterior(microglia_body_fit3) |>
+  mutate(Model = "Wide prior") |> 
+  select(Model, Parameter, Median, CI_low, CI_high) 
+
+model4 <- describe_posterior(microglia_body_fit4) |>
+  mutate(Model = "Wider prior") |>
+  select(Model, Parameter, Median, CI_low, CI_high)
+
+prior_table <- bind_rows(model1, model2, model3, model4) |> 
+  arrange(desc(Parameter)) |> 
+  kable(digits = 2,
+               col.names = c("Model", "Parameter", "Median Estimate", "Lower 95% HDI", "Upper 95% HDI"))
+```
+
+## Branches Length 
+```{r}
+mod_branch_length <- bf(normalised_branch_length ~ StimCondition * Brain_Area + (1 | ID))
+
+get_prior(mod_branch_length, data = flk1_normalised) 
+```
+
+```{r}
+priors_branches <- prior(normal(-5, 5), class = "b", coef = "StimCondition4Hz") +
+  prior(normal(0, 5), class = "b", coef = "StimConditionDark") +
+  prior(normal(-40, 5), class = "b", coef = "Brain_AreaRSC") +
+  prior(normal(-5, 5), class = "b", coef = "StimCondition4Hz:Brain_AreaRSC") +
+  prior(normal(0, 5), class = "b", coef = "StimConditionDark:Brain_AreaRSC") +
+  prior(normal(-35, 5), class = "Intercept") +
+  prior(normal(0, 3), class = "sigma") +
+  prior(normal(0, 3), class = "sd")
+```
+
+```{r}
+branches_fit <- brm(
+  formula = mod_branch_length,
+  data = flk1_normalised,
+  prior = priors_branches,
+  family = gaussian(),
+  seed = 2900,
+  chains = 4,   
+  iter = 4000,
+  warmup = 1000,
+  control = list(adapt_delta = 0.95),
+  file = "Models/Branches_2"
+)
+```
+
+```{r}
+summary(branches_fit)
+bayes_R2(branches_fit)
+```
+
+```{r fig.height= 8}
+plot(branches_fit)
+```
+
+```{r}
+plot(p_direction(branches_fit),
+     priors = TRUE)
+```
+
+```{r}
+plot(hdi(branches_fit))
+```
+
+```{r}
+branches_plots <- conditional_effects(branches_fit)
+```
+
+```{r}
+#we then create different objects for each of the effects
+branches_condition <- plot(branches_plots,
+     plot = FALSE,
+     cat_args = list(show.legend = F))[[1]] + #calls the stimulation condition plot
+  theme_bw() +
+  labs( x = "Stimulation Condition", y = "Percentage change in microglia process length (% averaged to control)") +
+  labs(title = "Main Effect of Stimulation Condition on Microglia Process Length")
+
+branches_area <- plot(branches_plots,
+     plot = FALSE,
+     cat_args = list(show.legend = F))[[2]] + #calls the brain area plot
+  theme_bw() +
+  labs( x = "Brain Area", y = "Percentage change in microglia process length (% averaged to control)") +
+  labs(title = "Main Effect of Brain Area on Microglia Process Length")
+
+branches_stim_area <- plot(branches_plots,
+     plot = FALSE,
+     cat_args = list(show.legend = F))[[3]] + #calls the interaction plot
+  theme_bw() +
+  labs( x = "Stimulation Condition", y = "Percentage change in microglia process length (% averaged to control)") +
+  labs(title = "Effects of Stimulation Condition and Brain Area on Microglia Process Length")
+```
+
+
+```{r}
+plot(residuals(branches_fit))
+qqnorm(residuals(branches_fit))
+```
+
+## Comparison with wider priors 
+```{r}
+mod_branch_length <- bf(normalised_branch_length ~ StimCondition * Brain_Area + (1 | ID))
+
+get_prior(mod_branch_length, data = flk1_normalised) 
+```
+
+```{r}
+priors_branches2 <- prior(normal(-5, 10), class = "b", coef = "StimCondition4Hz") +
+  prior(normal(0, 10), class = "b", coef = "StimConditionDark") +
+  prior(normal(-40, 10), class = "b", coef = "Brain_AreaRSC") +
+  prior(normal(-5, 10), class = "b", coef = "StimCondition4Hz:Brain_AreaRSC") +
+  prior(normal(0, 10), class = "b", coef = "StimConditionDark:Brain_AreaRSC") +
+  prior(normal(-35, 10), class = "Intercept") +
+  prior(normal(0, 3), class = "sigma") +
+  prior(normal(0, 3), class = "sd")
+```
+
+```{r}
+branches_fit2 <- brm(
+  formula = mod_branch_length,
+  data = flk1_normalised,
+  prior = priors_branches2,
+  family = gaussian(),
+  seed = 2900,
+  chains = 4,   
+  iter = 4000,
+  warmup = 1000,
+  control = list(adapt_delta = 0.95),
+  file = "Models/Branches_wide"
+)
+```
+
+```{r}
+summary(branches_fit2)
+bayes_R2(branches_fit2)
+```
+
+```{r fig.height= 8}
+plot(branches_fit2)
+```
+
+```{r}
+plot(p_direction(branches_fit2),
+     priors = TRUE)
+```
+
+```{r}
+plot(hdi(branches_fit2))
+```
+
+```{r}
+branches_plots2 <- conditional_effects(branches_fit2)
+```
+
+```{r}
+#we then create different objects for each of the effects
+branches_condition2 <- plot(branches_plots2,
+     plot = FALSE,
+     cat_args = list(show.legend = F))[[1]] + #calls the stimulation condition plot
+  theme_bw() +
+  labs( x = "Stimulation Condition", y = "Percentage change in microglia process length (% averaged to control)") +
+  labs(title = "Main Effect of Stimulation Condition on Microglia Process Length")
+
+branches_area2 <- plot(branches_plots2,
+     plot = FALSE,
+     cat_args = list(show.legend = F))[[2]] + #calls the brain area plot
+  theme_bw() +
+  labs( x = "Brain Area", y = "Percentage change in microglia process length (% averaged to control)") +
+  labs(title = "Main Effect of Brain Area on Microglia Process Length")
+
+branches_stim_area2 <- plot(branches_plots2,
+     plot = FALSE,
+     cat_args = list(show.legend = F))[[3]] + #calls the interaction plot
+  theme_bw() +
+  labs( x = "Stimulation Condition", y = "Percentage change in microglia process length (% averaged to control)") +
+  labs(title = "Effects of Stimulation Condition and Brain Area on Microglia Process Length")
+```
+
+
+```{r}
+plot(residuals(branches_fit2))
+qqnorm(residuals(branches_fit2))
+```
+
+## Comparison with default priors
+```{r}
+mod_branch_length <- bf(normalised_branch_length ~ StimCondition * Brain_Area + (1 | ID))
+
+get_prior(mod_branch_length, data = flk1_normalised) 
+```
+
+
+```{r}
+branches_fit3 <- brm(
+  formula = mod_branch_length,
+  data = flk1_normalised,
+  family = gaussian(),
+  seed = 2900,
+  chains = 4,   
+  iter = 4000,
+  warmup = 1000,
+  control = list(adapt_delta = 0.95),
+  file = "Models/Branches_default"
+)
+```
+
+```{r}
+summary(branches_fit3)
+bayes_R2(branches_fit3)
+```
+
+```{r fig.height= 8}
+plot(branches_fit3)
+```
+
+```{r}
+plot(p_direction(branches_fit3),
+     priors = TRUE)
+```
+
+```{r}
+plot(hdi(branches_fit3))
+```
+
+```{r}
+branches_plots3 <- conditional_effects(branches_fit3)
+```
+
+```{r}
+#we then create different objects for each of the effects
+branches_condition3 <- plot(branches_plots3,
+     plot = FALSE,
+     cat_args = list(show.legend = F))[[1]] + #calls the stimulation condition plot
+  theme_bw() +
+  labs( x = "Stimulation Condition", y = "Percentage change in microglia process length (% averaged to control)") +
+  labs(title = "Main Effect of Stimulation Condition on Microglia Process Length")
+
+branches_area3 <- plot(branches_plots3,
+     plot = FALSE,
+     cat_args = list(show.legend = F))[[2]] + #calls the brain area plot
+  theme_bw() +
+  labs( x = "Brain Area", y = "Percentage change in microglia process length (% averaged to control)") +
+  labs(title = "Main Effect of Brain Area on Microglia Process Length")
+
+branches_stim_area3 <- plot(branches_plots3,
+     plot = FALSE,
+     cat_args = list(show.legend = F))[[3]] + #calls the interaction plot
+  theme_bw() +
+  labs( x = "Stimulation Condition", y = "Percentage change in microglia process length (% averaged to control)") +
+  labs(title = "Effects of Stimulation Condition and Brain Area on Microglia Process Length")
+```
+
+```{r}
+plot(residuals(branches_fit3))
+qqnorm(residuals(branches_fit3))
+```
+
+```{r}
+#comaparing conditional effects plots to get a better feel of the priors
+branches_stim_area
+branches_stim_area2
+branches_stim_area3
+```
+
+```{r}
+model1_branches <- describe_posterior(branches_fit) |> 
+  mutate(Model = "User prior") |>
+  select(Model, Parameter, Median, CI_low, CI_high) 
+
+model2_branches <- describe_posterior(branches_fit2) |>
+  mutate(Model = "Wide prior") |> 
+  select(Model, Parameter, Median, CI_low, CI_high) 
+
+model3_branches <- describe_posterior(branches_fit3) |>
+  mutate(Model = "Default prior") |> 
+  select(Model, Parameter, Median, CI_low, CI_high) 
+
+prior_table_branches <- bind_rows(model1_branches, model2_branches, model3_branches) |> 
+  arrange(desc(Parameter)) |> 
+  kable(digits = 2,
+               col.names = c("Model", "Parameter", "Median Estimate", "Lower 95% HDI", "Upper 95% HDI"))
+```
+
+## Microglia number model 
+```{r}
+mod_microglia_number <- bf(MicrogliaNumber ~ StimCondition * Brain_Area + (1 | ID))
+
+get_prior(mod_microglia_number, data = flk1_normalised) 
+```
+
+```{r}
+priors_microglia_n <- prior(normal(10, 10), class = "b", coef = "StimCondition4Hz") +
+  prior(normal(0, 10), class = "b", coef = "StimConditionDark") +
+  prior(normal(15, 10), class = "b", coef = "Brain_AreaRSC") +
+  prior(normal(10, 10), class = "b", coef = "StimCondition4Hz:Brain_AreaRSC") +
+  prior(normal(0, 10), class = "b", coef = "StimConditionDark:Brain_AreaRSC") +
+  prior(normal(15, 10), class = "Intercept") +
+  prior(normal(0, 3), class = "sigma") +
+  prior(normal(0, 3), class = "sd")
+```
+
+```{r}
+microglia_n_fit <- brm(
+  formula = mod_microglia_number,
+  data = flk1_normalised,
+  prior = priors_microglia_n,
+  family = gaussian(),
+  seed = 2900,
+  chains = 4,   
+  iter = 4000,
+  warmup = 1000,
+  control = list(adapt_delta = 0.95),
+  file = "Models/Microglia_n"
+)
+```
+
+```{r}
+summary(microglia_n_fit)
+bayes_R2(microglia_n_fit)
+```
+
+```{r fig.height= 8}
+plot(microglia_n_fit)
+```
+
+```{r}
+plot(p_direction(microglia_n_fit),
+     priors = TRUE)
+```
+
+```{r}
+plot(hdi(microglia_n_fit))
+```
+
+```{r}
+microglia_n_plots <- conditional_effects(microglia_n_fit)
+```
+
+```{r}
+#we then create different objects for each of the effects
+n_condition <- plot(microglia_n_plots,
+     plot = FALSE,
+     cat_args = list(show.legend = F))[[1]] + #calls the stimulation condition plot
+  theme_bw() +
+  labs( x = "Stimulation Condition", y = "Microglia number in ROI") +
+  labs(title = "Main Effect of Stimulation Condition on Microglia Number")
+
+n_area <- plot(microglia_n_plots,
+     plot = FALSE,
+     cat_args = list(show.legend = F))[[2]] + #calls the brain area plot
+  theme_bw() +
+  labs( x = "Brain Area", y = "Microglia number in ROI") +
+  labs(title = "Main Effect of Brain Area on Microglia Number")
+
+n_stim_area <- plot(microglia_n_plots,
+     plot = FALSE,
+     cat_args = list(show.legend = F))[[3]] + #calls the interaction plot
+  theme_bw() +
+  labs( x = "Stimulation Condition", y = "Microglia number in ROI") +
+  labs(title = "Effects of Stimulation Condition and Brain Area on Microglia Number")
+```
+
+```{r}
+n_stim_area
+```
+
+```{r}
+plot(residuals(branches_fit2))
+qqnorm(residuals(branches_fit2))
+```
+
+## Cohort FLK2 
+```{r}
+flk2_wide <- dataset_flk2 |>
+  mutate(MouseID = gsub("M_coordinates", "Microglia", MouseID)) |>
+  mutate(MouseID = gsub("AB_coordinates", "Abeta", MouseID)) |>
+  separate(MouseID, c("ID", "Type", "Cohort", "Brain_Area")) |>
+  mutate(StimCondition = case_when(
+    grepl("^M[4-6]", ID) ~ "Combined40Hz",
+    grepl("^M[7-9]", ID) ~ "Dark",
+    TRUE ~ "Other")) |>
+  pivot_wider(
+    names_from = Type,
+    values_from = c(Area, X, Y, Feret)
+  ) |>
+  mutate(Strain = case_when(
+    grepl("^M[4-9]", ID) ~ "APP",
+    TRUE ~ "Other"
+  )) |>
+  select(-Area_Results, -X_Results, -Y_Results, -Feret_Results) |>
+  mutate(Sex = case_when(
+    grepl("^M[4-6]", ID) ~ "Male",
+    grepl("^M[7-9]", ID) ~ "Female"
+  ))
+```
+
+```{r}
+#Calculating baseline values for CA1 and RSC
+baseline <- flk2_wide |>
+  group_by(Brain_Area) |> #grouping by area so we get two baselines
+  filter(StimCondition == "Dark") |> 
+  summarise(
+    mean_area = mean(Area_Microglia, na.rm = TRUE),
+    mean_branch_length = mean(`Average Branch Length`, na.rm = TRUE) #perfomr summary statistics to get the 
+  )
+flk2_wide <- flk2_wide |>
+  left_join(baseline, by = "Brain_Area")
+
+
+flk2_normalised <- flk2_wide |>
+  mutate(normalised_area = (Area_Microglia - mean_area) / mean_area * 100,
+          normalised_branch_length = (`Average Branch Length` - mean_branch_length) / mean_branch_length * 100
+  )
+```
+
+```{r}
+ggplot(flk2_wide, aes(StimCondition, Area_Microglia, fill = Brain_Area)) +
+  geom_boxplot(alpha = 0.5) +
+  geom_jitter() +
+  scale_fill_manual(values = c("springgreen3", "darkorange2")) +
+  labs(x = "Stimulation Condition",
+       y= "Microglia Body Size") +
+  labs(title = "Difference in microglia body size between stimulation conditions")
+```
+```{r}
+pos <- position_dodge(0.9)
+
+ggplot(flk2_wide, aes(StimCondition, Area_Microglia, fill = Brain_Area)) +
+  geom_violin(position = pos,
+              trim = FALSE,
+              width = 0.8,
+              alpha = 0.5) +
+  geom_boxplot(position = pos,
+               width = 0.2,
+               alpha = 0.5,
+               outlier.shape = NA) +
+  geom_jitter(position = pos,
+              size = 1.5, 
+              alpha = 0.5, 
+              color = "black") +
+  stat_summary(fun = "mean", 
+               geom = "point", 
+               position = pos) +
+  stat_summary(fun.data = "mean_se", 
+               geom = "errorbar", 
+               width = .1,
+               position = pos) +
+  scale_y_continuous(breaks = c(4e+04, 6e+04, 8e+04, 1e+05, 12e+04)) +
+  scale_fill_manual(values = c("orchid", "cornflowerblue")) +
+  labs(x = "Stimulation Condition",
+       y= "Microglia Body Size") +
+  labs(title = "Difference in microglia body size between stimulation conditions",
+       fill = "Brain Areas") +
+  theme_minimal()
+```
+
+```{r}
+ggplot(flk2_normalised, aes(StimCondition, normalised_branch_length, fill = Brain_Area)) +
+  geom_boxplot(alpha = 0.5) +
+  geom_jitter() +
+  scale_fill_manual(values = c("springgreen3", "darkorange2")) +
+  labs(x = "Stimulation Condition",
+       y= "Microglia Process Length") +
+  labs(title = "Difference in microglia process length between stimulation conditions")
+```
+
+```{r}
+ggplot(flk2_wide, aes(StimCondition, `Average Branch Length`, fill = Brain_Area)) +
+  geom_violin(position = pos,
+              trim = FALSE,
+              width = 1.2,
+              alpha = 0.5) +
+  geom_boxplot(position = pos,
+               width = 0.2, 
+               alpha = 0, 
+               outlier.shape = NA) +
+  geom_jitter(position = pos,
+              size = 1.5, 
+              alpha = 0.5, 
+              color = "black") +
+  stat_summary(fun = "mean", 
+               geom = "point", 
+               position = pos) +
+  stat_summary(fun.data = "mean_se", 
+               geom = "errorbar", 
+               width = .1,
+               position = pos) +
+  scale_fill_manual(values = c("orchid", "cornflowerblue")) +
+  labs(x = "Stimulation Condition",
+       y = "Microglia Average Branch Length", 
+       title = "Difference in Microglia Average Branch Length Between Stimulation Conditions",
+       fill = "Brain Areas") +
+ theme_minimal()
+```
+
+
+## Microglia body size no dummy coded: FLK2
+```{r}
+
+mod_flk2_body2 <- bf(normalised_area ~ StimCondition * Brain_Area + (1 | ID))
+
+get_prior(mod_flk2_body2, data = flk2_normalised) 
+```
+
+```{r}
+priors_flk2_body2 <- prior(normal(0, 5), class = "b", coef = "StimConditionDark") +
+  prior(normal(80, 5), class = "b", coef = "Brain_AreaRSC") +
+  prior(normal(0, 5), class = "b", coef = "StimConditionDark:Brain_AreaRSC") +
+  prior(normal(80, 5), class = "Intercept") +
+  prior(normal(0, 3), class = "sigma") +
+  prior(normal(0, 3), class = "sd")
+```
+
+```{r}
+body_fit2_flk2 <- brm(
+  formula = mod_flk2_body2,
+  data = flk2_normalised,
+  prior = priors_flk2_body2,
+  family = gaussian(),
+  seed = 2900,
+  chains = 4,
+  iter = 4000,
+  warmup = 1000,
+  control = list(adapt_delta = 0.95), 
+  file = "Models/FLK2_2"
+)
+```
+
+```{r}
+summary(body_fit2_flk2)
+bayes_R2(body_fit2_flk2)
+```
+
+```{r fig.height= 8}
+plot(body_fit2_flk2)
+```
+
+```{r}
+plot(p_direction(body_fit2_flk2),
+     priors = TRUE)
+```
+
+```{r}
+plot(hdi(body_fit2_flk2))
+```
+
+```{r}
+body_plots_flk2_fit2 <- conditional_effects(body_fit2_flk2)
+```
+
+```{r}
+#we then create different objects for each of the effects
+body_condition_flk2_fit2 <- plot(body_plots_flk2_fit2,
+     plot = FALSE,
+     cat_args = list(show.legend = F))[[1]] + #calls the stimulation condition plot
+  theme_bw() +
+  labs( x = "Stimulation Condition", y = "Percentage change in microglia body size (% averaged to control)") +
+  labs(title = "Main Effect of Stimulation Condition on Microglia Body Size")
+
+body_area_flk2_fit2 <- plot(body_plots_flk2_fit2,
+     plot = FALSE,
+     cat_args = list(show.legend = F))[[2]] + #calls the brain area plot
+  theme_bw() +
+  labs( x = "Brain Area", y = "Percentage change in microglia body size (% averaged to control)") +
+  labs(title = "Main Effect of Brain Area on Microglia Body Size")
+
+body_stim_area_flk2_fit2 <- plot(body_plots_flk2_fit2,
+     plot = FALSE,
+     cat_args = list(show.legend = F))[[3]] + #calls the interaction plot
+  theme_bw() +
+  labs( x = "Stimulation Condition", y = "Percentage change in microglia body size (% averaged to control)") +
+  labs(title = "Effects of Stimulation Condition and Brain Area on Microglia Body Size")
+```
+
+
+```{r}
+plot(residuals(body_fit2_flk2))
+qqnorm(residuals(body_fit2_flk2))
+```
+
+#comparison with wider priors
+```{r}
+
+mod_flk2_body2 <- bf(normalised_area ~ StimCondition * Brain_Area + (1 | ID))
+
+get_prior(mod_flk2_body2, data = flk2_normalised) 
+```
+
+```{r}
+priors_flk2_body3 <- prior(normal(0, 10), class = "b", coef = "StimConditionDark") +
+  prior(normal(80, 10), class = "b", coef = "Brain_AreaRSC") +
+  prior(normal(0, 10), class = "b", coef = "StimConditionDark:Brain_AreaRSC") +
+  prior(normal(80, 10), class = "Intercept") +
+  prior(normal(0, 5), class = "sigma") +
+  prior(normal(0, 5), class = "sd")
+```
+
+```{r}
+body_fit2_flk3 <- brm(
+  formula = mod_flk2_body2,
+  data = flk2_normalised,
+  prior = priors_flk2_body3,
+  family = gaussian(),
+  seed = 2900,
+  chains = 4,
+  iter = 4000,
+  warmup = 1000,
+  control = list(adapt_delta = 0.95), 
+  file = "Models/FLK2_3"
+)
+```
+
+```{r}
+summary(body_fit2_flk3)
+bayes_R2(body_fit2_flk3)
+```
+
+```{r fig.height= 8}
+plot(body_fit2_flk3)
+```
+
+```{r}
+plot(p_direction(body_fit2_flk3),
+     priors = TRUE)
+```
+
+```{r}
+plot(hdi(body_fit2_flk3))
+```
+
+```{r}
+body_plots_flk2_fit3 <- conditional_effects(body_fit2_flk3)
+```
+
+```{r}
+#we then create different objects for each of the effects
+body_condition_flk2_fit3 <- plot(body_plots_flk2_fit3,
+     plot = FALSE,
+     cat_args = list(show.legend = F))[[1]] + #calls the stimulation condition plot
+  theme_bw() +
+  labs( x = "Stimulation Condition", y = "Percentage change in microglia body size (% averaged to control)") +
+  labs(title = "Main Effect of Stimulation Condition on Microglia Body Size")
+
+body_area_flk2_fit3 <- plot(body_plots_flk2_fit3,
+     plot = FALSE,
+     cat_args = list(show.legend = F))[[2]] + #calls the brain area plot
+  theme_bw() +
+  labs( x = "Brain Area", y = "Percentage change in microglia body size (% averaged to control)") +
+  labs(title = "Main Effect of Brain Area on Microglia Body Size")
+
+body_stim_area_flk2_fit3 <- plot(body_plots_flk2_fit3,
+     plot = FALSE,
+     cat_args = list(show.legend = F))[[3]] + #calls the interaction plot
+  theme_bw() +
+  labs( x = "Stimulation Condition", y = "Percentage change in microglia body size (% averaged to control)") +
+  labs(title = "Effects of Stimulation Condition and Brain Area on Microglia Body Size")
+```
+
+```{r}
+plot(residuals(body_fit2_flk3))
+qqnorm(residuals(body_fit2_flk3))
+```
+
+#comparison with default priors
+```{r}
+
+mod_flk2_body2 <- bf(normalised_area ~ StimCondition * Brain_Area + (1 | ID))
+
+get_prior(mod_flk2_body2, data = flk2_normalised) 
+```
+
+
+```{r}
+body_fit2_flk4 <- brm(
+  formula = mod_flk2_body2,
+  data = flk2_normalised,
+  family = gaussian(),
+  seed = 2900,
+  chains = 4,
+  iter = 4000,
+  warmup = 1000,
+  control = list(adapt_delta = 0.95), 
+  file = "Models/FLK2_4"
+)
+```
+
+```{r}
+summary(body_fit2_flk4)
+bayes_R2(body_fit2_flk4)
+```
+
+```{r fig.height= 8}
+plot(body_fit2_flk4)
+```
+
+```{r}
+plot(p_direction(body_fit2_flk4),
+     priors = TRUE)
+```
+
+```{r}
+plot(hdi(body_fit2_flk4))
+```
+
+```{r}
+conditional_effects(body_fit2_flk4)
+```
+
+```{r}
+plot(residuals(body_fit2_flk4))
+qqnorm(residuals(body_fit2_flk4))
+```
+
+```{r}
+body_plots_flk2_fit4 <- conditional_effects(body_fit2_flk4)
+```
+
+```{r}
+#we then create different objects for each of the effects
+body_condition_flk2_fit4 <- plot(body_plots_flk2_fit4,
+     plot = FALSE,
+     cat_args = list(show.legend = F))[[1]] + #calls the stimulation condition plot
+  theme_bw() +
+  labs( x = "Stimulation Condition", y = "Percentage change in microglia body size (% averaged to control)") +
+  labs(title = "Main Effect of Stimulation Condition on Microglia Body Size")
+
+body_area_flk2_fit4 <- plot(body_plots_flk2_fit4,
+     plot = FALSE,
+     cat_args = list(show.legend = F))[[2]] + #calls the brain area plot
+  theme_bw() +
+  labs( x = "Brain Area", y = "Percentage change in microglia body size (% averaged to control)") +
+  labs(title = "Main Effect of Brain Area on Microglia Body Size")
+
+body_stim_area_flk2_fit4 <- plot(body_plots_flk2_fit4,
+     plot = FALSE,
+     cat_args = list(show.legend = F))[[3]] + #calls the interaction plot
+  theme_bw() +
+  labs( x = "Stimulation Condition", y = "Percentage change in microglia body size (% averaged to control)") +
+  labs(title = "Effects of Stimulation Condition and Brain Area on Microglia Body Size")
+```
+
+
+```{r}
+#comaparing conditional effects plots to get a better feel of the priors
+body_stim_area_flk2_fit2
+body_stim_area_flk2_fit3
+body_stim_area_flk2_fit4
+```
+
+```{r}
+model1_flk2 <- describe_posterior(body_fit2_flk2) |> 
+  mutate(Model = "User prior") |>
+  select(Model, Parameter, Median, CI_low, CI_high) 
+
+model2_flk2 <- describe_posterior(body_fit2_flk3) |>
+  mutate(Model = "Wide prior") |> 
+  select(Model, Parameter, Median, CI_low, CI_high) 
+
+model3_flk2 <- describe_posterior(body_fit2_flk4) |>
+  mutate(Model = "Default prior") |> 
+  select(Model, Parameter, Median, CI_low, CI_high) 
+
+prior_table_flk2 <- bind_rows(model1_flk2, model2_flk2, model3_flk2) |> 
+  arrange(desc(Parameter)) |> 
+  kable(digits = 2,
+               col.names = c("Model", "Parameter", "Median Estimate", "Lower 95% HDI", "Upper 95% HDI"))
+```
+
+## narrower priors
+```{r}
+priors_flk2_body2 <- prior(normal(8, 2.5), class = "b", coef = "StimCondition") +
+  prior(normal(4, 2.5), class = "b", coef = "Brain_Area") +
+  prior(normal(10, 2.5), class = "b", coef = "StimCondition:Brain_Area") +
+  prior(normal(0, 3), class = "sigma") +
+  prior(normal(0, 3), class = "sd")
+```
+
+### Microglia process lenght not dummy coded: FLK2
+```{r}
+mod_flk2_branches2 <- bf(normalised_branch_length ~ StimCondition * Brain_Area + (1 | ID))
+
+get_prior(mod_flk2_branches2, data = flk2_normalised) 
+```
+
+```{r}
+priors_flk2_branches2 <- prior(normal(0, 5), class = "b", coef = "StimConditionDark") +
+  prior(normal(-40, 5), class = "b", coef = "Brain_AreaRSC") +
+  prior(normal(0, 5), class = "b", coef = "StimConditionDark:Brain_AreaRSC") +
+  prior(normal(-35, 5), class = "Intercept") +
+  prior(normal(0, 3), class = "sigma") +
+  prior(normal(0, 3), class = "sd")
+```
+
+```{r}
+branches_fit2_flk2 <- brm(
+  formula = mod_flk2_branches2,
+  data = flk2_normalised,
+  prior = priors_flk2_branches2,
+  family = gaussian(),
+  seed = 2900,
+  chains = 4,
+  iter = 4000,
+  warmup = 1000,
+  control = list(adapt_delta = 0.95),
+  file = "Models/FLK2_branches2"
+)
+```
+
+
+```{r}
+summary(branches_fit2_flk2)
+bayes_R2(branches_fit2_flk2)
+```
+
+```{r fig.height= 8}
+plot(branches_fit2_flk2)
+```
+
+```{r}
+plot(p_direction(branches_fit2_flk2),
+     priors = TRUE)
+```
+
+```{r}
+plot(hdi(branches_fit2_flk2))
+```
+
+```{r}
+branches_plots_flk2 <- conditional_effects(branches_fit2_flk2)
+```
+
+```{r}
+#we then create different objects for each of the effects
+branches_condition_flk2 <- plot(branches_plots_flk2,
+     plot = FALSE,
+     cat_args = list(show.legend = F))[[1]] + #calls the stimulation condition plot
+  theme_bw() +
+  labs( x = "Stimulation Condition", y = "Percentage change in microglia process length (% averaged to control)") +
+  labs(title = "Main Effect of Stimulation Condition on Microglia Process Length")
+
+branches_area_flk2 <- plot(branches_plots_flk2,
+     plot = FALSE,
+     cat_args = list(show.legend = F))[[2]] + #calls the brain area plot
+  theme_bw() +
+  labs( x = "Brain Area", y = "Percentage change in microglia process length (% averaged to control)") +
+  labs(title = "Main Effect of Brain Area on Microglia Body Size")
+
+branches_stim_area_flk2 <- plot(branches_plots_flk2,
+     plot = FALSE,
+     cat_args = list(show.legend = F))[[3]] + #calls the interaction plot
+  theme_bw() +
+  labs( x = "Stimulation Condition", y = "Percentage change in microglia process length (% averaged to control)") +
+  labs(title = "Effects of Stimulation Condition and Brain Area on Microglia Process Length")
+```
+
+```{r}
+plot(residuals(branches_fit2_flk2))
+qqnorm(residuals(branches_fit2_flk2))
+```
+
+## comparison with wider priors
+```{r}
+mod_flk2_branches2 <- bf(normalised_branch_length ~ StimCondition * Brain_Area + (1 | ID))
+
+get_prior(mod_flk2_branches2, data = flk2_normalised) 
+```
+
+```{r}
+priors_flk2_branches3 <- prior(normal(0, 10), class = "b", coef = "StimConditionDark") +
+  prior(normal(-40, 10), class = "b", coef = "Brain_AreaRSC") +
+  prior(normal(0, 10), class = "b", coef = "StimConditionDark:Brain_AreaRSC") +
+  prior(normal(-35, 10), class = "Intercept") +
+  prior(normal(0, 5), class = "sigma") +
+  prior(normal(0, 5), class = "sd")
+```
+
+```{r}
+branches_fit3_flk2 <- brm(
+  formula = mod_flk2_branches2,
+  data = flk2_normalised,
+  prior = priors_flk2_branches3,
+  family = gaussian(),
+  seed = 2900,
+  chains = 4,
+  iter = 4000,
+  warmup = 1000,
+  control = list(adapt_delta = 0.95),
+  file = "Models/FLK2_branches3"
+)
+```
+
+
+```{r}
+summary(branches_fit3_flk2)
+bayes_R2(branches_fit3_flk2)
+```
+
+```{r fig.height= 8}
+plot(branches_fit3_flk2)
+```
+
+```{r}
+plot(p_direction(branches_fit3_flk2),
+     priors = TRUE)
+```
+
+```{r}
+plot(hdi(branches_fit3_flk2))
+```
+
+```{r}
+branches_plots_flk2_fit3 <- conditional_effects(branches_fit3_flk2)
+```
+
+```{r}
+#we then create different objects for each of the effects
+branches_condition_flk2_fit3 <- plot(branches_plots_flk2_fit3,
+     plot = FALSE,
+     cat_args = list(show.legend = F))[[1]] + #calls the stimulation condition plot
+  theme_bw() +
+  labs( x = "Stimulation Condition", y = "Percentage change in microglia process length (% averaged to control)") +
+  labs(title = "Main Effect of Stimulation Condition on Microglia Process Length")
+
+branches_area_flk2_fit3 <- plot(branches_plots_flk2_fit3,
+     plot = FALSE,
+     cat_args = list(show.legend = F))[[2]] + #calls the brain area plot
+  theme_bw() +
+  labs( x = "Brain Area", y = "Percentage change in microglia process length (% averaged to control)") +
+  labs(title = "Main Effect of Brain Area on Microglia Process Length")
+
+branches_stim_area_flk2_fit3 <- plot(branches_plots_flk2_fit3,
+     plot = FALSE,
+     cat_args = list(show.legend = F))[[3]] + #calls the interaction plot
+  theme_bw() +
+  labs( x = "Stimulation Condition", y = "Percentage change in microglia process length (% averaged to control)") +
+  labs(title = "Effects of Stimulation Condition and Brain Area on Microglia Process Length")
+```
+
+```{r}
+plot(residuals(branches_fit3_flk2))
+qqnorm(residuals(branches_fit3_flk2))
+```
+
+#comparison with default priors
+
+```{r}
+mod_flk2_branches2 <- bf(normalised_branch_length ~ StimCondition * Brain_Area + (1 | ID))
+
+get_prior(mod_flk2_branches2, data = flk2_normalised) 
+```
+
+
+```{r}
+branches_fit4_flk2 <- brm(
+  formula = mod_flk2_branches2,
+  data = flk2_normalised,
+  family = gaussian(),
+  seed = 2900,
+  chains = 4,
+  iter = 4000,
+  warmup = 1000,
+  control = list(adapt_delta = 0.95),
+  file = "Models/FLK2_branches4"
+)
+```
+
+
+```{r}
+summary(branches_fit4_flk2)
+bayes_R2(branches_fit4_flk2)
+```
+
+```{r fig.height= 8}
+plot(branches_fit4_flk2)
+```
+
+```{r}
+plot(p_direction(branches_fit4_flk2),
+     priors = TRUE)
+```
+
+```{r}
+plot(hdi(branches_fit4_flk2))
+```
+
+```{r}
+branches_plots_flk2_fit4 <- conditional_effects(branches_fit4_flk2)
+```
+
+```{r}
+#we then create different objects for each of the effects
+branches_condition_flk2_fit4 <- plot(branches_plots_flk2_fit4,
+     plot = FALSE,
+     cat_args = list(show.legend = F))[[1]] + #calls the stimulation condition plot
+  theme_bw() +
+  labs( x = "Stimulation Condition", y = "Percentage change in microglia process length (% averaged to control)") +
+  labs(title = "Main Effect of Stimulation Condition on Microglia Process Length")
+
+branches_area_flk2_fit4 <- plot(branches_plots_flk2_fit4,
+     plot = FALSE,
+     cat_args = list(show.legend = F))[[2]] + #calls the brain area plot
+  theme_bw() +
+  labs( x = "Brain Area", y = "Percentage change in microglia process length (% averaged to control)") +
+  labs(title = "Main Effect of Brain Area on Microglia Process Length")
+
+branches_stim_area_flk2_fit4 <- plot(branches_plots_flk2_fit4,
+     plot = FALSE,
+     cat_args = list(show.legend = F))[[3]] + #calls the interaction plot
+  theme_bw() +
+  labs( x = "Stimulation Condition", y = "Percentage change in microglia process length (% averaged to control)") +
+  labs(title = "Effects of Stimulation Condition and Brain Area on Microglia Process Length")
+```
+
+```{r}
+branches_stim_area_flk2
+branches_stim_area_flk2_fit3
+branches_stim_area_flk2_fit4
+```
+
+```{r}
+plot(residuals(branches_fit4_flk2))
+qqnorm(residuals(branches_fit2_flk2))
+```
+
+```{r}
+model1_flk2_branches <- describe_posterior(branches_fit2_flk2) |> 
+  mutate(Model = "User prior") |>
+  select(Model, Parameter, Median, CI_low, CI_high) 
+
+model2_flk2_branches <- describe_posterior(branches_fit3_flk2) |>
+  mutate(Model = "Wide prior") |> 
+  select(Model, Parameter, Median, CI_low, CI_high) 
+
+model3_flk2_branches <- describe_posterior(branches_fit4_flk2) |>
+  mutate(Model = "Default prior") |> 
+  select(Model, Parameter, Median, CI_low, CI_high) 
+
+prior_table_flk2_branches <- bind_rows(model1_flk2_branches, model2_flk2_branches, model3_flk2_branches) |> 
+  arrange(desc(Parameter)) |> 
+  kable(digits = 2,
+               col.names = c("Model", "Parameter", "Median Estimate", "Lower 95% HDI", "Upper 95% HDI"))
+```
+
